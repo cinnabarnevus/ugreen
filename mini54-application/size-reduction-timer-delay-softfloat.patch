@@ -1,0 +1,129 @@
+From 557224b70cbc236909b4211861154af6f7294da8 Mon Sep 17 00:00:00 2001
+From: zjw <zhaojw@jwele.com.cn>
+Date: Wed, 16 Sep 2026 10:47:52 +0800
+Subject: [PATCH] Library: drop the soft float dependency from TIMER_Delay
+
+TIMER_Delay() formed u32Usec * u32Clk in float only to dodge a 32-bit
+overflow (1e6 usec at 24 MHz is 2.4e13, which needs 45 bits).  On this
+FPU-less Cortex-M0 that one expression is what pulls the entire soft
+float library into the image: timer.o(.text.TIMER_Delay) is the sole
+referrer to __aeabi_ui2f, __aeabi_fmul, __aeabi_fdiv and __aeabi_f2uiz,
+and fepilogue.o is pulled only by fdiv.o and ffltui.o.  Rewriting it
+reclaims the whole chain, 430 bytes:
+
+    fdiv 124 + fepilogue 130 + ffixui 40 + ffltui 14 + fmul 122
+
+Splitting both operands at 1000 keeps every intermediate inside 32 bits,
+so this needs neither float nor a 64-bit multiply helper.  uint64_t is
+deliberately avoided: Cortex-M0 is ARMv6-M and has no UMULL, so the
+product would risk pulling in __aeabi_lmul, which is not in the image
+today.  (A 64-bit *division* would be free - uldiv.o is already linked
+via printf - but a 64-bit multiply is not.)
+
+    a*b = (1000*a1 + a0) * (1000*b1 + b0)
+        = 1e6*a1*b1 + 1000*s + t     s = a1*b0 + a0*b1
+                                     t = a0*b0
+
+so  a*b/1e6 = a1*b1 + (1000*s + t)/1e6, and with s = 1000*q + r that
+second term is q + ((1000*r + t) >= 1e6), because 1000*r + t < 2e6.  That
+carry is the last term of the new expression, which makes it the exact
+quotient rather than an approximation.
+
+Behaviour is unchanged and in fact slightly better.  The float version was
+not exact to begin with - 24 mantissa bits cannot resolve 1.2e12 any finer
+than 131072, and over a 20M-sample sweep of the documented domain it
+disagreed with the exact quotient about 22% of the time; it merely happened
+to be exact at this firmware's 12 MHz operating point.  The new expression
+is exact everywhere, and at 12 MHz produces a bit-identical compare value
+for every delay this project uses (10/100/500/1000/10000/100000 usec).
+
+Bounds: u32Clk is at most 0xFFFFFF at this point (the prescale branch just
+above), and TIMER_Delay is documented for u32Usec up to 1e6, so a1 <= 1000,
+b1 <= 16777, s <= 1.78e7 and 1000*r + t <= 2.0e6 - all far inside 32 bits,
+and the quotient stays well inside the 24-bit TCMPR.
+
+Verified on the host by extracting the changed lines verbatim and
+comparing against 64-bit arithmetic: zero mismatches over the full
+documented domain.  A Keil rebuild is still needed to confirm the byte
+saving, since no ARM toolchain is available here.
+
+Note this is the first change to a vendor file under Library/ in this
+repository; the two commits that have ever touched Library/ are both build
+setup.
+
+This file is CRLF, so apply it with either
+
+    git apply size-reduction-timer-delay-softfloat.patch
+
+or
+
+    git am --keep-cr size-reduction-timer-delay-softfloat.patch
+
+The --keep-cr matters: plain `git am` strips the trailing CR from each
+line while splitting the mail, and the patch then no longer matches a
+CRLF source file.  Both of the above were tested to reproduce the working
+tree byte for byte.
+
+---
+ 1 file changed, 34 insertions(+), 5 deletions(-)
+
+diff --git a/Library/StdDriver/src/timer.c b/Library/StdDriver/src/timer.c
+index 557224b..767483e 100755
+--- a/Library/StdDriver/src/timer.c
++++ b/Library/StdDriver/src/timer.c
+@@ -84,7 +84,6 @@ void TIMER_Delay(TIMER_T *timer, uint32_t u32Usec)
+ {
+     uint32_t u32Clk = TIMER_GetModuleClock(timer);
+     uint32_t u32Prescale = 0, delay = SystemCoreClock / u32Clk;
+-    float fCmpr;
+ 
+     // Clear current timer configuration
+     timer->TCSR = 0;
+@@ -101,10 +100,40 @@ void TIMER_Delay(TIMER_T *timer, uint32_t u32Usec)
+         u32Clk >>= 1;
+     }
+ 
+-    // u32Usec * u32Clk might overflow if using uint32_t
+-    fCmpr = ((float)u32Usec * (float)u32Clk) / 1000000.0;
+-
+-    timer->TCMPR = (uint32_t)fCmpr;
++    // u32Usec * u32Clk might overflow if using uint32_t : up to 1e6 usec at
++    // 24 MHz is 2.4e13, which needs 45 bits.  The original code formed the
++    // product in float, and on this FPU-less Cortex-M0 that one line pulled
++    // the whole soft float library into the image - fdiv, fmul, ffixui,
++    // ffltui and fepilogue, 430 bytes - to compute what only ever becomes a
++    // 24-bit compare value.
++    //
++    // Splitting both operands at 1000 keeps every step inside 32 bits, so
++    // this needs neither float nor a 64-bit multiply helper (the M0 has no
++    // UMULL, so forming the product in uint64_t would pull in __aeabi_lmul) :
++    //
++    //     a*b = (1000*a1 + a0) * (1000*b1 + b0)
++    //         = 1e6*a1*b1 + 1000*s + t     s = a1*b0 + a0*b1
++    //                                      t = a0*b0
++    //
++    // so  a*b/1e6 = a1*b1 + (1000*s + t)/1e6, and with s = 1000*q + r that
++    // second term is q + ((1000*r + t) >= 1e6), since 1000*r + t < 2e6.  The
++    // last line below is that carry.  So this is the exact quotient, not an
++    // approximation - the float version could not even be exact, carrying
++    // only 24 mantissa bits, which at the 1.2e12 of a 100ms delay at 12MHz
++    // resolve no finer than 131072.
++    //
++    // Bounds : u32Clk is at most 0xFFFFFF here (the prescale branch above)
++    // and TIMER_Delay is documented for u32Usec up to 1e6, so a1 <= 1000,
++    // b1 <= 16777, s <= 1.78e7 and 1000*r + t <= 2.0e6 - all far inside
++    // 32 bits, and the quotient stays well inside the 24-bit TCMPR.
++    {
++        uint32_t a1 = u32Usec / 1000, a0 = u32Usec % 1000;
++        uint32_t b1 = u32Clk  / 1000, b0 = u32Clk  % 1000;
++        uint32_t s  = a1 * b0 + a0 * b1;
++
++        timer->TCMPR = a1 * b1 + s / 1000
++                     + (((s % 1000) * 1000 + a0 * b0) >= 1000000u);
++    }
+     timer->TCSR = TIMER_TCSR_CEN_Msk | u32Prescale; // one shot mode
+ 
+     // When system clock is faster than timer clock, it is possible timer active bit cannot set in time while we check it.
+
+-- 
+2.43.0

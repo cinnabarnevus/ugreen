@@ -1,0 +1,55 @@
+版本：V03
+作者：赵佳武
+修改时间：2026/9/29
+版本类型：Release
+版本适用产品型号/硬件：绿联项目INJANS06-LL
+版本来源：INJANS06分支   ssh://git@git.jwipc.com:223/embedded-team/embedded/MCU/E608_MCU.git
+版本文件：
+1.INJANS06_MINI54_MCU_V03.icp
+   1).文件说明：MCU的完整固件，使用NuMicro ICP Programming Tool.exe工具导入该文件烧录MCU固件
+   2).SHA256: 34b437af662a9a2189fae4899330eafb82fdc6129582a198cbe619152684b85d 
+2. mcu_upgrade_file_v03
+   1).文件说明：该文件解压到系统下执行脚本可升级MCU的application固件分区，前提是MCU烧录过固件
+   2).SHA256: a4558d07c04211aa29bc1e6e103b7e185d4e0711e75a13b106f506fe287a58b9  
+3.mini54-application.bin
+    1).文件说明：MCU的application固件分区
+    2).SHA256:  98d4d2dd57eecf6dbd49447231f3744ed0efb351fd06699c3bb6332f3d5f1e73
+4.mini54-loader.bin
+    1).文件说明：MCU的loader固件分区
+    2).SHA256:  e5fbff8a1e9ac4327a60d55615ce35e1b312bc3e477dfa02259e37b4f099e9f3
+5.mini54-data.bin
+    1).文件说明：MCU的data固件分区
+    2).SHA256:  a19769f8ceacfd50a826a1dcd26241a5a1728fd2e96d1a50d5c9e951762275e2
+
+修改内容：
+
+V03:
+watchdog ok!
+
+V02:
+注意：该版硬件上的pin脚发生变化，因为ADC按键必须要满足pin支持AIN的功能，故P15与P32对调（老版如果没有修改硬件pin脚，则无法开机）
+1.RGB功能正常，MCU_LED_STATE = 0x55,MCU_LED_COLOR_H = 0x56,MCU_LED_COLOR_M = 0x57,MCU_LED_COLOR_L = 0x58
+
+                         用i2c设置对应寄存器可改变颜色：
+                         eg: i2cset -y -f 12 0x15 0x56 0xff;  i2cset -y -f 12 0x15 0x57 0x00; i2cset -y -f 12 0x15 0x58 0x00; (灯为绿色)
+                         0xff0000   绿色  （0x56->0xff，0x57->0x00，0x58->0x00）  
+                         0x00ff00   红色  （0x56->0x00，0x57->0xff，0x58->0x00）
+                         0x0000ff   蓝色  （0x56->0x00，0x57->0x00，0x58->0xff）
+
+                         用i2c设置对应寄存器可改变模式：（常亮/闪烁/呼吸）
+                         eg:i2cset -y -f 12 0x15 0x55 0x00(常亮)
+                              ---------------------------0x01(闪烁)
+                              ---------------------------0x02(呼吸）     
+                    
+2.ADC功能正常，用i2cget -y -f 12 0x15 0x61可读adc按键的值
+                          0x00 无按键
+                          0x01 key1   SW3
+                          0x02 key2   SW2
+                          0x03 key3   SW1
+3.rtc唤醒正常
+4.wol唤醒正常
+
+V01：
+1.按键启动功能正常
+2.loader升级正常
+3.sata电源控制正常

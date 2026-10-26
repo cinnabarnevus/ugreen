@@ -1,0 +1,67 @@
+diff --git a/function/inc/pm.h b/function/inc/pm.h
+index 5c08937..b957bfa 100755
+--- a/function/inc/pm.h
++++ b/function/inc/pm.h
+@@ -20,6 +20,7 @@ typedef enum
+ #define NV_REQ_POWERON	(1 << 1)
+ 
+ extern uint32_t pending_power_request;
++extern uint8_t power_off_state;   /* power_control.c: 1 = host is off */
+ uint8_t get_poweron_times();
+ 
+ static inline void DISABLED_WOL_INTERRUPT(uint8_t type){
+diff --git a/function/src/led.c b/function/src/led.c
+index 23a3910..2062109 100644
+--- a/function/src/led.c
++++ b/function/src/led.c
+@@ -1,6 +1,7 @@
+ #include "core.h"
+ #include "board.h"
+ #include "led.h"
++#include "pm.h"
+ 
+ /*
+  * ARGB data line : P2.2 (MCU_RGB_CTL, see board.h).
+@@ -55,6 +56,7 @@
+ 
+ volatile led_mode_t g_led_mode;
+ static led_ctrl_t led_ctrl;
++static uint8_t led_off_logged = 0;
+ 
+ static inline __attribute__((always_inline)) void RGB_Store(uint32_t v)
+ {
+@@ -219,6 +221,22 @@ int RGB_Process(void)
+ 
+     led_ctrl.last_tick = led_ctrl.tick_100ms;
+ 
++    /* The host is off : the power state machine is sitting in PowerOff.  The
++       strip is fed from 5V_S5 and keeps its supply, so it would hold the last
++       frame the host left behind (its colour, or a blink) for as long as the
++       board stays off.  Feed it black instead.
++       g_led_mode / colors are NOT overwritten : the blink PowerOnhostBoard()
++       starts when the host is powered on again has to survive. */
++    if (power_off_state) {
++        if (!led_off_logged) {
++            led_off_logged = 1;
++            DEBUG("led: host off -> black\n");
++        }
++        RGB_SendData(0x000000);
++        return 0;
++    }
++    led_off_logged = 0;
++
+     if (g_led_mode == LED_MODE_BLINK && led_ctrl.colors.blink_timer != 0)
+     {
+         led_ctrl.phase_tick++;
+diff --git a/function/src/power_control.c b/function/src/power_control.c
+index 0222204..3392c9d 100755
+--- a/function/src/power_control.c
++++ b/function/src/power_control.c
+@@ -280,6 +280,7 @@ void PoweringOn(void)
+     if (power_event == INIT)
+     {
+         power_event = NONE; // clear power event
++        power_off_state = 0; // clear flag when exiting power off state
+     }
+ 
+     if (power_event == NONE)

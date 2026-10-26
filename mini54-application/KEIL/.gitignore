@@ -1,0 +1,13 @@
+*.o
+*.d
+*.crf
+
+Objects/
+Listings/
+*.uvguix.*
+*.uvoptx
+JLinkLog.txt
+
+EventRecorderStub.scvd
+Nu_Link_Driver.ini
+

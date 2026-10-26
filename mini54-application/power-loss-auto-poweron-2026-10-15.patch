@@ -1,0 +1,32 @@
+diff --git a/core/core.c b/core/core.c
+index ecb2817..a7c0e01 100755
+--- a/core/core.c
++++ b/core/core.c
+@@ -382,7 +382,7 @@ void InitDefaultFlashRegistBuffer(void){
+         Regist->pm_event = EVENT_HW_RESET;
+         Regist->RgbState = LED_MODE_ON;
+         Regist->flashRegist.Signature = AP_FIREWARE_GOOD_SIGNATURE;
+-        Regist->flashRegist.control.bits.power_loss = 0;
++        Regist->flashRegist.control.bits.power_loss = 1;
+ 				Regist->flashRegist.control.bits.rtc_wake_en = 1;
+         Regist->flashRegist.control.bits.wol_wake_en = 1; 
+         Regist->flashRegist.control.bits.watchdog_en = 0;
+diff --git a/function/src/pm.c b/function/src/pm.c
+index 2f22f1f..ee964b2 100755
+--- a/function/src/pm.c
++++ b/function/src/pm.c
+@@ -294,7 +294,13 @@ int PowerManageTaskWorker(struct task_struct *__this)
+ 	
+ 	switch(host_status){
+ 			case POWER_LOSS:
+-				if(HOST_PWR_IN == 1){
++			/* 主机是否真在跑不能只看 S5_PWRGD(P5.3): 它是 20V_S5_PG 与
++			   VCC_5V_S0_PG 的线与, 而 S0 那条 PG 是开漏+R134 上拉到 5V_S5,
++			   主机没上电时它也可能是高 -> 冷启动会被误判成
++			   "主机已开", 来电自启那条分支就永远走不到 */
++			DEBUG("POWER_LOSS: pwr_in=%d soc=%d power_loss=%d\n",
++			      HOST_PWR_IN,get_host_power_status(),Regist->flashRegist.control.bits.power_loss);
++			if((HOST_PWR_IN == 1) && (get_host_power_status() != POWER_OFF)){
+ 					host_status = POWER_ON;
+ 				}else{
+ 					if(sata_pwr_state != 0)

@@ -1,0 +1,129 @@
+diff --git a/function/src/pm.c b/function/src/pm.c
+index f3e16be..16165cf 100755
+--- a/function/src/pm.c
++++ b/function/src/pm.c
+@@ -229,18 +229,18 @@ int PowerManageTaskWorker(struct task_struct *__this)
+ 			case POWER_LOSS:
+ 				if(HOST_PWR_IN == 1){
+ 					host_status = POWER_ON;
++			}else{
++				if(Regist->flashRegist.control.bits.power_loss == 1){
++					DEBUG("Power Loss Poweron\n");
++					PowerOnhostBoard();
+ 				}else{
+-					if(Regist->flashRegist.control.bits.power_loss == 1){
+-						DEBUG("Power Loss Poweron\n");
++					if(power_on_is_enable_actived == 1){
++						power_on_is_enable_actived = 0;
+ 						PowerOnhostBoard();
+-					}else{
+-						if(power_on_is_enable_actived == 1){
+-							power_on_is_enable_actived = 0;
+-							PowerOnhostBoard();
+-						}	
+-					}
+-					host_status = POWER_OFF;
++					}	
++				host_status = POWER_OFF;
+ 				}
++			}
+ 				break;
+ 			case POWER_OFF:
+ 				power_on_is_enable_actived = 0;
+diff --git a/function/src/power_control.c b/function/src/power_control.c
+index 4af97cd..b1d0338 100755
+--- a/function/src/power_control.c
++++ b/function/src/power_control.c
+@@ -135,7 +135,7 @@ void handle_event(void) {};
+ 
+ struct gd_t {
+ 	uint32_t timer0_flag;
+-	uint32_t timer1_flag;
++	uint32_t timer1_flag;   //上电、下电、复位的PWR_GOOD的延时
+ 	uint32_t timer2_flag;
+ 	uint32_t timer3_flag;
+ } gd;
+@@ -171,6 +171,7 @@ void timer3_handler(void) {
+ 	vtimer_list[3].enable = 0;
+ }
+ 
++/*每tick调power_handler()*/
+ void mainloop_handler(void) {
+ 	power_handler();
+ }
+@@ -275,7 +276,7 @@ void PowerOff(void)
+ void PoweringOn(void)
+ {
+ 		struct RegistBuffer *Regist = (struct RegistBuffer*)RegistBuffer;
+-			
++
+     if (power_event == INIT)
+     {
+         power_event = NONE; // clear power event
+@@ -283,19 +284,19 @@ void PoweringOn(void)
+ 
+     if (power_event == NONE)
+     {
+-				HOST_POWER_ENABLE = 0;
++			HOST_POWER_ENABLE = 1;
+ 			  if(PWR_GOOD){
+ 					VIN_PWR_ON = 1;
+ 					clear_flag_and_start_timer1(TIMER1_POWER_ON_PMIC);
+ 					power_event = POWERING_ON_PMIC;
+-				} 
++				}else{
++				}
+     }
+     else if (power_event == POWERING_ON_PMIC)
+     {
+         if (gd.timer1_flag)
+         {
+             PMIC_EN0 = 1;
+-            // Set up timer for POWERING_ON_WAIT_FOR_PWR_GOOD
+             clear_flag_and_start_timer1(TIMER1_POWER_ON_WAIT_PWR_GOOD);
+             power_event = POWERING_ON_WAIT_FOR_PWR_GOOD;
+         }
+@@ -392,7 +393,7 @@ void PoweringOff(void)
+     if (power_event == NONE)
+     {
+ 			if(Regist->flashRegist.control.bits.wol_wake_en != 1){
+-				HOST_POWER_ENABLE = 1;
++				HOST_POWER_ENABLE = 0;
+ 				if(!PWR_GOOD){
+ 					PMIC_EN0 = 0;
+ 					// Set up timer for POWERING_OFF_VIN_PWR_ON
+diff --git a/function/src/wol.c b/function/src/wol.c
+index c5df472..d9123f3 100755
+--- a/function/src/wol.c
++++ b/function/src/wol.c
+@@ -1042,15 +1042,23 @@ void wol_init(void)
+     if(Regist->flashRegist.control.bits.wol_wake_en != 1){
+         HOST_WOL_EN_OUT = 1;
+     }else {
+-      if(Regist->flashRegist.control.bits.power_loss != 1){
+-				HOST_POWER_ENABLE = 0;
+-				Delay100ms(10);
+-				if(HOST_PWR_IN){
+-					if(config_wol() == 0 || Regist->flashRegist.control.bits.wol_wake_en == 1){
++			      if(Regist->flashRegist.control.bits.power_loss != 1){
++                               HOST_POWER_ENABLE = 0;
++                               Delay100ms(10);
++                               if(HOST_PWR_IN){
++                                       if(config_wol() == 0 || Regist->flashRegist.control.bits.wol_wake_en == 1){
+            ENABLED_WOL_INTERRUPT(0,wol_int_flag());
+-					}
+-				}
++                                       }
++                               }
+       }
++
++		HOST_POWER_ENABLE = 0;
++		Delay100ms(10);
++		if(HOST_PWR_IN){
++			if(config_wol() == 0 || Regist->flashRegist.control.bits.wol_wake_en == 1){
++				ENABLED_WOL_INTERRUPT(0,wol_int_flag());
++			}
++		}
+     }
+ }
+ 

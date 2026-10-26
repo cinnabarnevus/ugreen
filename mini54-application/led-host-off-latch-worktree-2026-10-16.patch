@@ -1,0 +1,194 @@
+diff --git a/core/core.h b/core/core.h
+index c6cc7d6..de9a42a 100755
+--- a/core/core.h
++++ b/core/core.h
+@@ -66,9 +66,10 @@ typedef enum
+ } MCU_REGIST;
+ 
+ typedef enum {
+-	HOST_SHUTDOWN = 1,
++	HOST_SHUTDOWN = 1,   /* written at BOOT time: "this power cycle is not a reboot" */
+ 	HOST_FULL_RESET = 2,
+-	HOST_DELAY_POWERON = 3
++	HOST_DELAY_POWERON = 3,
++	HOST_POWEROFF_NOW = 4   /* the host is cutting its own power right now (led blackout) */
+ } HOST_PM_MODE;
+ 
+ typedef union {
+diff --git a/function/inc/led.h b/function/inc/led.h
+index 6b17fff..976d6f5 100644
+--- a/function/inc/led.h
++++ b/function/inc/led.h
+@@ -31,6 +31,8 @@ void RGB_SendData(uint32_t data);   /* send one 24bit GRB frame */
+ void RGB_Reset(uint32_t hi, uint32_t lo);   /* reset/latch pulse after a frame */
+ void Timer1_Init(void);
+ void RGB_SetMode(led_mode_t mode);
++void RGB_HostOff(void);     /* host shut down : black the strip out */
++void RGB_HostOn(void);      /* host powering up : display allowed */
+ void init_led_colors(void);
+ void set_color(uint32_t value);
+ void set_blink_timer(uint8_t value);
+diff --git a/function/src/led.c b/function/src/led.c
+index 23a3910..ca596ab 100644
+--- a/function/src/led.c
++++ b/function/src/led.c
+@@ -55,6 +55,11 @@
+ 
+ volatile led_mode_t g_led_mode;
+ static led_ctrl_t led_ctrl;
++/* The host is off : the strip has to stay dark.  power_control.c raises this
++   in PoweringOff(), right before it cuts PMIC_EN0, and pm.c clears it from
++   PowerOnhostBoard() when the host comes back up.  It starts as 1, so a
++   boot with the host off never lights the strip. */
++static uint8_t led_host_off = 1;
+ 
+ static inline __attribute__((always_inline)) void RGB_Store(uint32_t v)
+ {
+@@ -98,6 +103,15 @@ void RGB_SendData(uint32_t data)
+     /* keep the interrupts off, the timing is cycle sensitive */
+     __disable_irq();
+ 
++    /* RGB_HostOff() can run from the I2C interrupt (the host's HOST_POWEROFF_NOW
++       write), so the latch is re-checked here, already inside the critical
++       section : a frame prepared just before that write must not land after
++       the blackout frame and become the last one the strip latches. */
++    if (led_host_off)
++    {
++        data = led_ctrl.colors.color_off;
++    }
++
+     /* latch the other P2 outputs once, only P2.2 may change from here on */
+     hi = P2_DOUT | RGB_BIT;
+     lo = P2_DOUT & ~RGB_BIT;
+@@ -174,6 +188,29 @@ void RGB_SetMode(led_mode_t mode)
+     led_ctrl.phase_tick = 0;
+ }
+ 
++/* The host has shut down.  The strip is fed from 5V_S5 and keeps its supply,
++ * so whatever the host left latched - its colour, or a blink phase - would
++ * stay lit, and RGB_Process would keep re-sending that frame, for as long as
++ * the board stays off.  Black it out instead. */
++void RGB_HostOff(void)
++{
++    led_host_off = 1;
++    led_ctrl.led_on = 0;
++
++    /* Do not wait for the next RGB_Process() tick : PMIC_EN0 is cut microseconds
++       after this call, and that takes VCC_3V3_S0 - the rail the ARGB driver
++       stage is referenced to - with it, so the frame has to be on the line
++       now rather than up to one 10ms tick later. */
++    RGB_SendData(led_ctrl.colors.color_off);
++}
++
++/* The host is on its way up again.  PowerOnhostBoard() is the funnel of every
++ * wake path (button, WOL, RTC, reboot), so the display comes back with it. */
++void RGB_HostOn(void)
++{
++    led_host_off = 0;
++}
++
+ void init_led_colors(void)
+ {
+     struct RegistBuffer *Regist = (struct RegistBuffer*)RegistBuffer;
+@@ -194,6 +231,13 @@ void init_led_colors(void)
+         led_ctrl.colors.color = 0xff0000;
+     }
+ 
++    /* An MCU reboot while the host is running must not black the strip out, and a
++       boot with the host off must not light it.  Only a positively detected live
++       host counts : P5.3 (S5_PWRGD) on its own is not enough, its S0 side is an
++       open drain PG that leaves the line high while the S0 rail is down (see the
++       POWER_LOSS case in pm.c). */
++    led_host_off = ((HOST_PWR_IN == 1) && (get_host_power_status() != POWER_OFF)) ? 0 : 1;
++
+     /* RgbState is the register the host reads/writes, keep the running mode
+        in sync with it - otherwise "set the same value again" would be
+        ignored by the write callback in pm.c and the LED would not change. */
+@@ -219,6 +263,16 @@ int RGB_Process(void)
+ 
+     led_ctrl.last_tick = led_ctrl.tick_100ms;
+ 
++    /* The host is off : stay silent.  RGB_HostOff() already latched black while
++       the driver stage still had its rail; anything sent from here goes out
++       while VCC_3V3_S0 is collapsing, the edges slow down, the strip reads the
++       short '0' pulses as ones and latches a bright wrong colour instead of
++       staying black.  The strip holds the black frame on its own. */
++    if (led_host_off)
++    {
++        return 0;
++    }
++
+     if (g_led_mode == LED_MODE_BLINK && led_ctrl.colors.blink_timer != 0)
+     {
+         led_ctrl.phase_tick++;
+@@ -261,6 +315,10 @@ int RGB_Process(void)
+         RGB_SendData(grb_data);
+         break;
+     default:
++        /* An unknown mode value (anything the host writes into 0x55 beyond the
++           three above) must not leave the strip frozen on its last frame : fail
++           safe to black, the same frame the blink's dark phase uses. */
++        RGB_SendData(led_ctrl.colors.color_off);
+         break;
+     }
+     return 0;
+diff --git a/function/src/pm.c b/function/src/pm.c
+index 2f22f1f..0745be3 100755
+--- a/function/src/pm.c
++++ b/function/src/pm.c
+@@ -135,6 +135,12 @@ int PowerManageTransCallback(uint8_t reg,uint8_t value) {
+ 			case MCU_PM_CTRL:
+     	  if(value == HOST_SHUTDOWN){
+ 					Regist->soc_reboot_flag = 0;
++    	  }else if(value == HOST_POWEROFF_NOW){
++					/* The host is about to cut its own power : black the strip out
++					   now, while its driver stage still has VCC_3V3_S0 (see led.c).
++					   Runs in the I2C interrupt, so led.c re-checks the latch inside
++					   RGB_SendData() to make sure no later frame undoes it. */
++					RGB_HostOff();
+     	  }else if(value == HOST_FULL_RESET){
+ 					host_status = POWER_RESET;
+ 					Regist->pm_event = EVENT_REBOOT;
+@@ -242,6 +248,7 @@ int PowerOnhostBoard(void)
+       wol_pme_actived = 0;
+ 			ir_pme_actived = 0;
+       power_button_pressed = 0;
++      RGB_HostOn();                     /* host coming up : display allowed */
+       RGB_SetMode(LED_MODE_BLINK);
+       Regist->RgbState = LED_MODE_BLINK;
+       set_color(0xff0000);
+diff --git a/function/src/power_control.c b/function/src/power_control.c
+index 0222204..be514cb 100755
+--- a/function/src/power_control.c
++++ b/function/src/power_control.c
+@@ -9,6 +9,7 @@
+ #include "board.h"
+ #include "pm.h"
+ #include <stdio.h>
++#include "led.h"
+ 
+ #define DEBUG_NV_POWER_CONTROL	1
+ 
+@@ -400,6 +401,22 @@ void PoweringOff(void)
+ 					power_event = POWERING_OFF_VIN_PWR_ON;
+ 				}
+ 			}else{
++				/* With WOL enabled the S5 rail stays up (HOST_POWER_ENABLE = S5_PWR_EN
++				   drives the PHY), so the strip keeps its supply and has to be blacked
++				   out.  Do it BEFORE PMIC_EN0 drops: the ARGB driver stage is
++				   referenced to VCC_3V3_S0 and cannot drive the line once the SoC's
++				   rails are gone.  (In the WOL-disabled branch S5 itself is cut, so
++				   the strip loses power and needs no frame.) */
++				RGB_HostOff();
++				/* TEMP diagnostic - remove once the OS-shutdown race is understood:
++				   printed AFTER the blackout frame (so it does not delay it) but still
++				   BEFORE PMIC_EN0 drops, so it shows whether the host was still alive
++				   when the frame went out.
++				     g = PWR_GOOD (S5_PWRGD)   f = FORCE_SHUTDOWN_N (P0.5, 0 = host asked)
++				     s = host status bits (3 = POWER_ON, 2 = POWER_OFF)
++				     btn = power button level (0 = being held) */
++				DEBUG("off: g=%d f=%d s=%d btn=%d\n",
++				      PWR_GOOD, FORCE_SHUTDOWN_N, get_host_power_status(), PWR_BTN_N);
+ 				PMIC_EN0 = 0;
+ 				// Set up timer for POWERING_OFF_VIN_PWR_ON
+ 				clear_flag_and_start_timer1(TIMER1_POWER_OFF_VIN);

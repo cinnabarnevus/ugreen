@@ -1,0 +1,31 @@
+# 超大文件 / 烧录输出（GitHub 单文件上限 100MB）
+/*.zip
+/out/
+
+# 厂商资料与临时文件（公开前需确认授权）
+/mini54-application/tmp/
+/mini54-application/INJANS06-LL V0.1 0811.pdf
+/mini54-application/Jetson_Thor_Series_Modules_DesignGuide_DG12084001_v1.5.pdf
+/mini54-application/mcu_upgrade_file_v04.zip
+
+# 构建产物 / IDE 生成文件
+**/Objects/
+**/Listings/
+**/lst/
+**/obj/
+**/Release/
+*.uvguix.*
+*.uvgui.*
+*.uvoptx
+*.saved_uv4
+*.o
+*.d
+*.crf
+*.dep
+JLinkLog.txt
+EventRecorderStub.scvd
+
+# 本地配置 / 临时文件
+**/.claude/
+*.tmp
+*~

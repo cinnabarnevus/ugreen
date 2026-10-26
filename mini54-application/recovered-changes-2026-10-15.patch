@@ -1,0 +1,142 @@
+diff --git a/function/inc/pm.h b/function/inc/pm.h
+index 5c08937..b957bfa 100755
+--- a/function/inc/pm.h
++++ b/function/inc/pm.h
+@@ -20,6 +20,7 @@ typedef enum
+ #define NV_REQ_POWERON	(1 << 1)
+ 
+ extern uint32_t pending_power_request;
++extern uint8_t power_off_state;   /* power_control.c: 1 = host is off */
+ uint8_t get_poweron_times();
+ 
+ static inline void DISABLED_WOL_INTERRUPT(uint8_t type){
+diff --git a/function/src/led.c b/function/src/led.c
+index 23a3910..a163902 100644
+--- a/function/src/led.c
++++ b/function/src/led.c
+@@ -1,6 +1,7 @@
+ #include "core.h"
+ #include "board.h"
+ #include "led.h"
++#include "pm.h"
+ 
+ /*
+  * ARGB data line : P2.2 (MCU_RGB_CTL, see board.h).
+@@ -55,6 +56,7 @@
+ 
+ volatile led_mode_t g_led_mode;
+ static led_ctrl_t led_ctrl;
++static uint8_t led_off_logged = 0;   /* TEMP diagnostic, remove later */
+ 
+ static inline __attribute__((always_inline)) void RGB_Store(uint32_t v)
+ {
+@@ -102,6 +104,8 @@ void RGB_SendData(uint32_t data)
+     hi = P2_DOUT | RGB_BIT;
+     lo = P2_DOUT & ~RGB_BIT;
+ 
++    /* TEMP A/B: back to 4 - if the steady green returns, the strip has
++       more LEDs than 4 and the rest were never updated */
+     for (led_count = 0; led_count < 4; led_count++) {
+         mask = 0x800000;
+ 
+@@ -219,6 +223,23 @@ int RGB_Process(void)
+ 
+     led_ctrl.last_tick = led_ctrl.tick_100ms;
+ 
++    /* Host is off (the power state machine reached PowerOff): the strip is
++       fed from 5V_S5 and keeps its power, so keep sending black whatever
++       mode/colour the host left behind.  Those are NOT overwritten - the
++       red blink PowerOnhostBoard() sets has to survive until power on. */
++    if (power_off_state) {
++        /* TEMP diagnostic: one line per transition, not per frame */
++        if (!led_off_logged) {
++            led_off_logged = 1;
++            DEBUG("led: host off -> black\n");
++        }
++        RGB_SendData(0x000000);
++        return 0;
++    } else if (led_off_logged) {
++        led_off_logged = 0;
++        DEBUG("led: host on\n");
++    }
++
+     if (g_led_mode == LED_MODE_BLINK && led_ctrl.colors.blink_timer != 0)
+     {
+         led_ctrl.phase_tick++;
+diff --git a/function/src/pm.c b/function/src/pm.c
+index 2f22f1f..c9fee62 100755
+--- a/function/src/pm.c
++++ b/function/src/pm.c
+@@ -26,6 +26,11 @@ static uint8_t wol_pme_actived = 0;
+ static uint8_t ir_pme_actived = 0;
+ static uint8_t power_on_is_enable_actived = 0;
+ uint8_t sata_pwr_state = 0;
++
++/* 主机通过 MCU_PM_CTRL=HOST_SHUTDOWN 通知关机时置 1: 关机过程中 P3.6 上
++   最后一个下降沿会把倒计时重新拉起来, 这期间不再重新武装看门狗;
++   等 MCU 重新给主机上电, 或主机再次写 0x0F=1 时清零 */
++static uint8_t host_shutdown_req = 0;
+ //uint32_t volatile* WOL_PME[] = {&HOST_WOL_PME_IN,&HOST_OLD_WOL_PME_IN};
+ //uint32_t volatile* IR_RECEIVE[] = {&MCU_IR_RECEIVE_IN,&MCU_OLD_IR_RECEIVE_IN};
+ 
+@@ -113,7 +118,7 @@ int PowerManageTransCallback(uint8_t reg,uint8_t value) {
+               Regist->flashRegist.WdtTimout = value;
+ 							update_watchdog_time();
+               FlashRegistUpdate();
+-              if(Regist->flashRegist.control.bits.watchdog_en == 1){
++              if((Regist->flashRegist.control.bits.watchdog_en == 1) && (host_shutdown_req == 0)){
+                   UpdateAlarmEventTime(&WatchdogAlarmItem, Regist->watchdog_timout *6* 1000, 1);
+               }
+           } 
+@@ -125,6 +130,7 @@ int PowerManageTransCallback(uint8_t reg,uint8_t value) {
+               Regist->flashRegist.control.bits.watchdog_en = temp;
+               FlashRegistUpdate();
+               if(Regist->flashRegist.control.bits.watchdog_en == 1){
++                  host_shutdown_req = 0;        /* 主机重新使能监视 */
+                   UpdateAlarmEventTime(&WatchdogAlarmItem, Regist->watchdog_timout *6* 1000, 1);
+               }else{
+                   UpdateAlarmEventTime(&WatchdogAlarmItem, Regist->watchdog_timout *6* 1000, 0);
+@@ -135,11 +141,14 @@ int PowerManageTransCallback(uint8_t reg,uint8_t value) {
+ 			case MCU_PM_CTRL:
+     	  if(value == HOST_SHUTDOWN){
+ 					Regist->soc_reboot_flag = 0;
++					UpdateAlarmEventTime(&WatchdogAlarmItem, 0, 0);
++					host_shutdown_req = 1;              /* 关机流程内不再被 P3.6 边沿武装 */
+     	  }else if(value == HOST_FULL_RESET){
+ 					host_status = POWER_RESET;
+ 					Regist->pm_event = EVENT_REBOOT;
+     	  }else if(value == HOST_DELAY_POWERON){
+ 					Regist->soc_reboot_flag = 1;
++					host_shutdown_req = 0;        /* 主机要求延时上电, 恢复监视 */
+ 					UpdateAlarmEventTime(&WatchdogAlarmItem, 100 * 1000, 1);
+     	  }
+         break;
+@@ -242,6 +251,7 @@ int PowerOnhostBoard(void)
+       wol_pme_actived = 0;
+ 			ir_pme_actived = 0;
+       power_button_pressed = 0;
++      host_shutdown_req = 0;        /* 重新上电, 恢复看门狗监视 */
+       RGB_SetMode(LED_MODE_BLINK);
+       Regist->RgbState = LED_MODE_BLINK;
+       set_color(0xff0000);
+@@ -452,7 +462,7 @@ void GPIO234_IRQHandler(void){
+     {
+         P3->ISRC = BIT6;
+         //DEBUG("watchdog feed...!!!\n");
+-        if(Regist->flashRegist.control.bits.watchdog_en == 1){
++        if((Regist->flashRegist.control.bits.watchdog_en == 1) && (host_shutdown_req == 0)){
+ 						 if(Regist->soc_reboot_flag == 1){
+ 							 UpdateAlarmEventTime(&WatchdogAlarmItem, 100 * 1000, 1);
+ 						 }else{
+diff --git a/function/src/power_control.c b/function/src/power_control.c
+index 0222204..db83ce6 100755
+--- a/function/src/power_control.c
++++ b/function/src/power_control.c
+@@ -280,6 +280,7 @@ void PoweringOn(void)
+     if (power_event == INIT)
+     {
+         power_event = NONE; // clear power event
++        power_off_state = 0; // 离开关机态, LED 恢复按主机设定走
+     }
+ 
+     if (power_event == NONE)

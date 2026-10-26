@@ -1,0 +1,176 @@
+diff --git a/function/src/pm.c b/function/src/pm.c
+index 2f22f1f..0dd57ee 100755
+--- a/function/src/pm.c
++++ b/function/src/pm.c
+@@ -373,11 +373,12 @@ int PowerManageTaskWorker(struct task_struct *__this)
+ 				}
+ 				break;
+ 			case POWER_RESET:
+-				DEBUG("process pwr reset host\n");
+-				if(HOST_PWR_IN == 1){
+-					host_status = POWER_ON;
+-				}
++//				DEBUG("process pwr reset host\n");
++//				if(HOST_PWR_IN == 1){
++//					host_status = POWER_ON;
++//				}
+ 				ResetHostBoard();
++				host_status = POWER_OFF;
+ 				break;              
+ 			default:
+ 				break;
+diff --git a/function/src/power_control.c b/function/src/power_control.c
+index 0222204..dae2038 100755
+--- a/function/src/power_control.c
++++ b/function/src/power_control.c
+@@ -30,13 +30,14 @@ uint8_t get_poweron_times()
+ #define PMIC_EN0		NV_POWER_EN_MINI54
+ 
+ 
++#define TIMER1_POWER_ON_VIN		20	//TIMER1_20MS
+ #define TIMER1_POWER_ON_PMIC		80	//TIMER1_80MS
+ #define TIMER1_POWER_ON_WAIT_PWR_GOOD	200	//TIMER1_200MS
+-#define TIMER1_POWER_OFF_VIN		10	//TIMER1_10MS
++#define TIMER1_POWER_OFF_VIN		10	//TIMER1_10MS   
+ #define TIMER1_RESET			100	//TIMER1_100MS
+-#define TIMER1_LEAK			200	//TIMER1_200MS
+-
++#define TIMER1_LEAK			220	//TIMER1_200MS
+ 
++#define PWR_BTN_SHUTDOWN_CNT  30
+ #define APP_VERSION_INFO "\r\nFW VER: 0.11\r\n"
+ 
+ // Timer 0: PWR_BTN_N long press
+@@ -55,6 +56,7 @@ typedef enum
+ {
+     NONE = 0,
+     INIT,
++    POWERING_ON_VIN_DELAY,
+     POWERING_ON_PMIC,
+     POWERING_ON_WAIT_FOR_PWR_GOOD,
+     POWERING_OFF_VIN_PWR_ON,
+@@ -284,13 +286,22 @@ void PoweringOn(void)
+ 
+     if (power_event == NONE)
+     {
++	
+ 			HOST_POWER_ENABLE = 1;
+ 			  if(PWR_GOOD){
+-					VIN_PWR_ON = 1;
+-					clear_flag_and_start_timer1(TIMER1_POWER_ON_PMIC);
+-					power_event = POWERING_ON_PMIC;
++					clear_flag_and_start_timer1(TIMER1_POWER_ON_VIN);
++					power_event = POWERING_ON_VIN_DELAY;
+ 				}
+     }
++    else if (power_event == POWERING_ON_VIN_DELAY)
++    {
++        if (gd.timer1_flag)
++        {
++            VIN_PWR_ON = 1;
++            clear_flag_and_start_timer1(TIMER1_POWER_ON_PMIC);
++            power_event = POWERING_ON_PMIC;
++        }
++    }
+     else if (power_event == POWERING_ON_PMIC)
+     {
+         if (gd.timer1_flag)
+@@ -326,6 +337,10 @@ void PowerOn(void)
+ {
+     static unsigned int pwr_btn_sec_counter = 0;
+ 
++		static uint8_t pwr_btn_seen_release = 0; /* 本状态内见过一次松开 */
++		static uint8_t pwr_btn_press_cnt = 0;            /* 连续按下的拍数 */
++		uint8_t pwr_btn_shutdown;
++
+     if (power_event == INIT)
+     {
+         power_event = NONE; // clear power event
+@@ -333,31 +348,49 @@ void PowerOn(void)
+         gd.timer0_flag = 0;
+ 
+         pwr_btn_sec_counter = 0;
++			
++				pwr_btn_seen_release = 0;
++				pwr_btn_press_cnt = 0;
++
+         PMIC_EN0 = 1;
+         VIN_PWR_ON = 1;
+         pending_power_request &= (~NV_REQ_POWERON);// clear the pending request.
+         power_on_times++;
+     }
+ 
+-    if ((PWR_BTN_N) == 0)
+-    {
+-        if (gd.timer0_flag == 1)
+-        {
+-            pwr_btn_sec_counter++;
+-        }
+-        if (vtimer_list[0].enable == 0)
+-        {
+-            // In case other interrupts trigger this function multiple times
+-            gd.timer0_flag = 0;
+-            // start timer0
+-						add_vtimer(0, timer0_handler, 100);
+-        }
+-    }
+-    else
+-    {
+-        pwr_btn_sec_counter = 0;
+-				del_vtimer(0);	// stop timer0
+-    }
++//    if ((PWR_BTN_N) == 0)
++//    {
++//        if (gd.timer0_flag == 1)
++//        {
++//            pwr_btn_sec_counter++;
++//        }
++//        if (vtimer_list[0].enable == 0)
++//        {
++//            // In case other interrupts trigger this function multiple times
++//            gd.timer0_flag = 0;
++//            // start timer0
++//						add_vtimer(0, timer0_handler, 100);
++//        }
++//    }
++//    else
++//    {
++//        pwr_btn_sec_counter = 0;
++//				del_vtimer(0);	// stop timer0
++//    }
++
++
++					if ((PWR_BTN_N) == 0)
++				 {
++							if (pwr_btn_press_cnt < PWR_BTN_SHUTDOWN_CNT)
++								 pwr_btn_press_cnt++;
++				 }
++				 else
++				 {
++						 pwr_btn_press_cnt = 0;
++						 pwr_btn_seen_release = 1;
++				 }
++		 
++				 pwr_btn_shutdown = (pwr_btn_seen_release && (pwr_btn_press_cnt >= PWR_BTN_SHUTDOWN_CNT));
+ 
+     if (pending_power_request & NV_REQ_POWEROFF)// Received the request of power off
+     {
+@@ -366,7 +399,8 @@ void PowerOn(void)
+     }
+ 
+     // 10s long press / 100ms = Timer0 expires 100 times
+-		if ((pwr_btn_sec_counter >= 100) || (PWR_GOOD == 0) || (FORCE_SHUTDOWN_N ==0)|| (get_host_power_status() == POWER_OFF))
++//		if ((pwr_btn_sec_counter >= 100) || (PWR_GOOD == 0) || (FORCE_SHUTDOWN_N ==0)|| (get_host_power_status() == POWER_OFF))
++				if (pwr_btn_shutdown||(PWR_GOOD == 0) || (FORCE_SHUTDOWN_N ==0)|| (get_host_power_status() == POWER_OFF))
+     {
+ 
+ 				DEBUG("shutdown...\n");
+@@ -418,6 +452,8 @@ void PoweringOff(void)
+     }
+     else if (power_event == POWERING_OFF_LEAK)
+     {
++				HOST_POWER_ENABLE = 0;
++			  HOST_WOL_EN_OUT = 1;
+         if (gd.timer1_flag)
+         {
+             gd.timer1_flag = 0;

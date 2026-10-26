@@ -1,0 +1,90 @@
+适配 NVIDIA 主板
+
+
+Nvidia上电时序:
+
+Nvidia 主板的上下电时序通过状态机来实现，
+主要包括
+	PowerOff	关机状态
+	PoweringOn	上电过程，提供上电时序
+	PowerOn		开机状态
+	PoweringOff	下电过程，提供下电时序
+	Reset		重启过程，但实际不会更改电源状态
+五个状态
+
+
+状态机运行在 systick 中断，通过 power_handler 被调用。
+
+Nvidia上电时序代码放在 power_control.c 里面，
+和 pm.c 中的 Power Manage 任务相互独立。
+
+两个任务通过 pending_power_request 变量来进行交互。
+
+
+
+
+
+
+
+//=======================================================
+
+main function:
+	board_init
+		SYS_Init
+		GPIO_Init
+		I2C_Init
+	core_init
+		InitFlashAndRegist
+			/* read register from FLASH to RegistBuffer->flashRegist */
+			InitDefaultFlashRegistBuffer
+				/* Init all registers in first boot */
+			FlashRegistUpdate
+				/* Update registers from RAM to FLASH */
+		pm_task_init
+			pm_gpio_init
+			RegistTaskWorker(&PowerManageItem);
+				/* PowerManageTaskWorker added to idle loop */
+			RegistTransBufferCallback(&PowerManageTransItem);
+				/* PowerManageTransCallback added to i2c callback */
+			RegistAlarmEventCallback(&WatchdogAlarmItem);
+				/* WatchdogAlarmCallback added to timer callback */
+		wol_init
+			RegistTransBufferCallback(&WolTransItem);
+				/* WolTransCallback added to i2c callback */
+				/* Set WOL enable or not */
+		ir_init
+			RegistTransBufferCallback(&IrTransItem);
+				/* IrTransCallback added to i2c callback */
+			Ir_Timer_Init
+			InitIrData
+			InitIrUserButton
+			/* Enable the interrupt of ir */
+		update_task_init
+			RegistTaskWorker(&UpdateItem);
+				/* UpdateTaskWorker added to idle loop */
+			RegistTransBufferCallback(&UpdateTransItem);
+				/* UpdateTransCallback added to i2c callback */
+	LED_blink
+	ScheduleTaskWorkerLooper
+
+
+idle loop:
+	PowerManageTaskWorker
+	UpdateTaskWorker
+
+
+i2c irq:
+	PowerManageTransCallback
+	WolTransCallback
+	IrTransCallback
+	UpdateTransCallback
+
+
+timer irq:
+	WatchdogAlarmCallback
+	power_handler
+		/* handle powering on or off */
+
+
+gpio irq:
+

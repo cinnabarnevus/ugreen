@@ -1,0 +1,2 @@
+*.c diff=gbk
+*.h diff=gbk
